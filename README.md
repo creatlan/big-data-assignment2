@@ -1,4 +1,4 @@
-# big-data-assignment2-2025
+# big-data-assignment2
 
 # How to run
 ## Step 1: Install prerequisites
