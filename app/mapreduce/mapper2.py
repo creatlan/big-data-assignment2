@@ -2,14 +2,13 @@ from __future__ import annotations
 
 import re
 import sys
-from collections import Counter
 
 
 TOKEN_PATTERN = re.compile(r"[a-z0-9']+")
 
 
 def tokenize(text: str) -> list[str]:
-    """Normalize text and split it into lowercase terms."""
+    """Normalize text the same way as mapper1 and split it into terms."""
 
     return TOKEN_PATTERN.findall(text.lower())
 
@@ -32,12 +31,9 @@ for raw_line in sys.stdin:
     if not doc_id or not doc_title or not doc_text:
         continue
 
-    tokens = tokenize(doc_text)
-    if not tokens:
+    doc_length = len(tokenize(doc_text))
+    if doc_length == 0:
         continue
 
-    term_counts = Counter(tokens)
-    doc_length = len(tokens)
-
-    for term, frequency in term_counts.items():
-        print(f"{term}\t{doc_id}|{doc_title}|{frequency}|{doc_length}")
+    print(f"{doc_id}\tDOC\t{doc_title}\t{doc_length}")
+    print(f"__CORPUS__\tLEN\t{doc_length}")
