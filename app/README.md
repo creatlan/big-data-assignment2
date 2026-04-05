@@ -7,9 +7,6 @@ This folder stores the text documents required to index. Here you can find a sam
 ### mapreduce
 This folder stores the mapper `mapperx.py` and reducer `reducerx.py` scripts for the MapReduce pipelines.
 
-### app.py
-This is a Python file to write code to store index data in Cassandra.
-
 ### app.sh
 The entrypoint for the executables in your repository and includes all commands that will run your programs in this folder.
 

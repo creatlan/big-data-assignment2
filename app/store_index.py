@@ -26,10 +26,8 @@ class VocabularyRow:
 class IndexPostingRow:
     term: str
     doc_id: str
-    title: str
-    term_frequency: int
-    doc_length: int
-    document_frequency: int
+    tf: int
+    df: int
 
 
 @dataclass(frozen=True)
@@ -40,10 +38,9 @@ class DocumentStatRow:
 
 
 @dataclass(frozen=True)
-class CorpusStatsRow:
-    document_count: int
-    average_document_length: float
-    total_document_length: int
+class CollectionStatsRow:
+    total_docs: int
+    avg_doc_length: float
 
 
 def iter_input_files(path: str) -> Iterator[Path]:
@@ -112,19 +109,17 @@ def parse_index(path: str) -> list[IndexPostingRow]:
                 IndexPostingRow(
                     term=term,
                     doc_id=posting_fields[0].strip(),
-                    title=posting_fields[1].strip(),
-                    term_frequency=int(posting_fields[2]),
-                    doc_length=int(posting_fields[3]),
-                    document_frequency=document_frequency,
+                    tf=int(posting_fields[2]),
+                    df=document_frequency,
                 )
             )
 
     return rows
 
 
-def parse_doc_stats(path: str) -> tuple[list[DocumentStatRow], CorpusStatsRow | None]:
+def parse_doc_stats(path: str) -> tuple[list[DocumentStatRow], CollectionStatsRow | None]:
     rows: list[DocumentStatRow] = []
-    corpus_stats: CorpusStatsRow | None = None
+    collection_stats: CollectionStatsRow | None = None
 
     for columns in read_tsv_lines(path):
         if not columns:
@@ -141,13 +136,12 @@ def parse_doc_stats(path: str) -> tuple[list[DocumentStatRow], CorpusStatsRow | 
             continue
 
         if columns[0] == "CORPUS" and len(columns) >= 4:
-            corpus_stats = CorpusStatsRow(
-                document_count=int(columns[1]),
-                average_document_length=float(columns[2]),
-                total_document_length=int(columns[3]),
+            collection_stats = CollectionStatsRow(
+                total_docs=int(columns[1]),
+                avg_doc_length=float(columns[2]),
             )
 
-    return rows, corpus_stats
+    return rows, collection_stats
 
 
 def ensure_schema(session, keyspace: str) -> None:
@@ -175,10 +169,8 @@ def ensure_schema(session, keyspace: str) -> None:
         CREATE TABLE IF NOT EXISTS inverted_index (
             term text,
             doc_id text,
-            title text,
-            term_frequency int,
-            doc_length int,
-            document_frequency int,
+            tf int,
+            df int,
             PRIMARY KEY ((term), doc_id)
         )
         """
@@ -196,11 +188,9 @@ def ensure_schema(session, keyspace: str) -> None:
 
     session.execute(
         """
-        CREATE TABLE IF NOT EXISTS corpus_stats (
-            stat_key text PRIMARY KEY,
-            document_count int,
-            average_document_length double,
-            total_document_length bigint
+        CREATE TABLE IF NOT EXISTS collection_stats (
+            stat_name text PRIMARY KEY,
+            stat_value double
         )
         """
     )
@@ -223,7 +213,7 @@ def load_vocabulary(session, rows: Sequence[VocabularyRow]) -> None:
 
 def load_index(session, rows: Sequence[IndexPostingRow]) -> None:
     statement = session.prepare(
-        "INSERT INTO inverted_index (term, doc_id, title, term_frequency, doc_length, document_frequency) VALUES (?, ?, ?, ?, ?, ?)"
+        "INSERT INTO inverted_index (term, doc_id, tf, df) VALUES (?, ?, ?, ?)"
     )
     execute_concurrent_with_args(
         session,
@@ -232,10 +222,8 @@ def load_index(session, rows: Sequence[IndexPostingRow]) -> None:
             (
                 row.term,
                 row.doc_id,
-                row.title,
-                row.term_frequency,
-                row.doc_length,
-                row.document_frequency,
+                row.tf,
+                row.df,
             )
             for row in rows
         ),
@@ -255,21 +243,24 @@ def load_doc_stats(session, rows: Sequence[DocumentStatRow]) -> None:
     )
 
 
-def load_corpus_stats(session, row: CorpusStatsRow) -> None:
+def load_collection_stats(session, row: CollectionStatsRow) -> None:
     session.execute(
-        "INSERT INTO corpus_stats (stat_key, document_count, average_document_length, total_document_length) VALUES (?, ?, ?, ?)",
-        ("bm25", row.document_count, row.average_document_length, row.total_document_length),
+        "INSERT INTO collection_stats (stat_name, stat_value) VALUES (?, ?)",
+        ("total_docs", float(row.total_docs)),
+    )
+    session.execute(
+        "INSERT INTO collection_stats (stat_name, stat_value) VALUES (?, ?)",
+        ("avg_doc_length", float(row.avg_doc_length)),
     )
 
 
-def derive_corpus_stats(rows: Sequence[DocumentStatRow]) -> CorpusStatsRow:
-    document_count = len(rows)
-    total_document_length = sum(row.doc_length for row in rows)
-    average_document_length = (total_document_length / document_count) if document_count else 0.0
-    return CorpusStatsRow(
-        document_count=document_count,
-        average_document_length=average_document_length,
-        total_document_length=total_document_length,
+def derive_collection_stats(rows: Sequence[DocumentStatRow]) -> CollectionStatsRow:
+    total_docs = len(rows)
+    total_doc_length = sum(row.doc_length for row in rows)
+    avg_doc_length = (total_doc_length / total_docs) if total_docs else 0.0
+    return CollectionStatsRow(
+        total_docs=total_docs,
+        avg_doc_length=avg_doc_length,
     )
 
 
@@ -288,10 +279,10 @@ def main() -> None:
 
     vocabulary_rows = parse_vocabulary(args.vocabulary_file)
     index_rows = parse_index(args.index_file)
-    document_rows, corpus_stats = parse_doc_stats(args.doc_stats_file)
+    document_rows, collection_stats = parse_doc_stats(args.doc_stats_file)
 
-    if corpus_stats is None:
-        corpus_stats = derive_corpus_stats(document_rows)
+    if collection_stats is None:
+        collection_stats = derive_collection_stats(document_rows)
 
     cluster = Cluster([args.host], port=args.port)
     session = cluster.connect()
@@ -300,7 +291,7 @@ def main() -> None:
         load_vocabulary(session, vocabulary_rows)
         load_index(session, index_rows)
         load_doc_stats(session, document_rows)
-        load_corpus_stats(session, corpus_stats)
+        load_collection_stats(session, collection_stats)
         print(
             "Loaded "
             f"{len(vocabulary_rows)} vocabulary rows, "

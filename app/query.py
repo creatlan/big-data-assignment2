@@ -1,175 +1,175 @@
 from __future__ import annotations
 
 import argparse
-import math
+import os
 import re
 import sys
-from dataclasses import dataclass
 
-from cassandra.cluster import Cluster
-from pyspark.sql import SparkSession
+from pyspark.sql import DataFrame, SparkSession, functions as F
 
 
+# Keep tokenization compatible with indexer mapper logic.
 TOKEN_PATTERN = re.compile(r"[a-z0-9']+")
 
 
-@dataclass(frozen=True)
-class QueryTermStats:
-    term: str
-    document_frequency: int
-
-
-@dataclass(frozen=True)
-class PostingRow:
-    term: str
-    doc_id: str
-    title: str
-    term_frequency: int
-    doc_length: int
-    document_frequency: int
-
-
-def tokenize(text: str) -> list[str]:
-    return TOKEN_PATTERN.findall(text.lower())
-
-
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="BM25 search over Cassandra-backed index")
-    parser.add_argument("query", nargs="*", help="Query text. If empty, stdin will be used.")
-    parser.add_argument("--host", default="cassandra-server", help="Cassandra host")
-    parser.add_argument("--port", type=int, default=9042, help="Cassandra port")
-    parser.add_argument("--keyspace", default="search_index", help="Cassandra keyspace")
-    parser.add_argument("--k1", type=float, default=1.0, help="BM25 k1 parameter")
-    parser.add_argument("--b", type=float, default=0.75, help="BM25 b parameter")
+    parser = argparse.ArgumentParser(description="PySpark BM25 search over Cassandra/ScyllaDB")
+    parser.add_argument("--host", default="cassandra-server", help="Cassandra/ScyllaDB host")
+    parser.add_argument("--port", type=int, default=9042, help="Cassandra/ScyllaDB native port")
+    parser.add_argument("--keyspace", default="search_index", help="Keyspace name")
+    parser.add_argument("--top_k", type=int, default=10, help="Number of top results to output")
     return parser.parse_args()
 
 
-def read_query(args: argparse.Namespace) -> str:
-    if args.query:
-        return " ".join(args.query).strip()
-    return sys.stdin.read().strip()
+def normalize_query(text: str) -> list[str]:
+    return [token for token in TOKEN_PATTERN.findall(text.lower()) if token]
 
 
-def fetch_corpus_stats(session) -> tuple[int, float]:
-    row = session.execute(
-        "SELECT document_count, average_document_length FROM corpus_stats WHERE stat_key = %s",
-        ("bm25",),
-    ).one()
+def read_query_from_stdin() -> str:
+    stdin_query = sys.stdin.read().strip()
+    if stdin_query:
+        return stdin_query
 
-    if row is not None and row.document_count and row.average_document_length:
-        return int(row.document_count), float(row.average_document_length)
-
-    rows = list(session.execute("SELECT doc_length FROM document_stats"))
-    document_count = len(rows)
-    average_document_length = (sum(r.doc_length for r in rows) / document_count) if document_count else 0.0
-    return document_count, average_document_length
+    # In YARN cluster deploy-mode, stdin from submit host may not reach the driver.
+    return os.environ.get("QUERY_TEXT", "").strip()
 
 
-def fetch_query_terms(session, terms: list[str]) -> list[QueryTermStats]:
-    statement = session.prepare("SELECT term, document_frequency FROM vocabulary WHERE term = ?")
-    rows: list[QueryTermStats] = []
-    for term in terms:
-        record = session.execute(statement, (term,)).one()
-        if record is None or record.document_frequency is None:
-            continue
-        rows.append(QueryTermStats(term=record.term, document_frequency=int(record.document_frequency)))
-    return rows
-
-
-def fetch_postings(session, terms: list[str]) -> list[PostingRow]:
-    statement = session.prepare(
-        "SELECT term, doc_id, title, term_frequency, doc_length, document_frequency FROM inverted_index WHERE term = ?"
+def build_spark_session(host: str, port: int) -> SparkSession:
+    return (
+        SparkSession.builder.appName("bm25-query")
+        .config("spark.cassandra.connection.host", host)
+        .config("spark.cassandra.connection.port", str(port))
+        .getOrCreate()
     )
-    rows: list[PostingRow] = []
-    for term in terms:
-        for record in session.execute(statement, (term,)):
-            rows.append(
-                PostingRow(
-                    term=record.term,
-                    doc_id=record.doc_id,
-                    title=record.title or "untitled",
-                    term_frequency=int(record.term_frequency or 0),
-                    doc_length=int(record.doc_length or 0),
-                    document_frequency=int(record.document_frequency or 0),
-                )
-            )
-    return rows
 
 
-def bm25_score(tf: int, df: int, dl: int, n_docs: int, avgdl: float, k1: float, b: float) -> float:
-    if tf <= 0 or df <= 0 or dl <= 0 or n_docs <= 0 or avgdl <= 0:
-        return 0.0
+def read_cassandra_table(spark: SparkSession, keyspace: str, table: str) -> DataFrame:
+    return (
+        spark.read.format("org.apache.spark.sql.cassandra")
+        .option("keyspace", keyspace)
+        .option("table", table)
+        .load()
+    )
 
-    idf = math.log(n_docs / df)
-    denominator = k1 * ((1.0 - b) + b * (dl / avgdl)) + tf
-    if denominator == 0:
-        return 0.0
 
-    return idf * ((k1 + 1.0) * tf) / denominator
+def get_collection_stats(spark: SparkSession, keyspace: str) -> tuple[float, float]:
+    # Preferred schema from assignment statement.
+    try:
+        collection_stats_df = read_cassandra_table(spark, keyspace, "collection_stats")
+        stats = (
+            collection_stats_df.where(F.col("stat_name").isin("total_docs", "avg_doc_length"))
+            .select("stat_name", "stat_value")
+            .collect()
+        )
+        stat_map: dict[str, float] = {
+            str(row["stat_name"]): float(row["stat_value"]) for row in stats if row["stat_name"] is not None
+        }
+        total_docs = stat_map.get("total_docs", 0.0)
+        avg_doc_length = stat_map.get("avg_doc_length", 0.0)
+        if total_docs > 0 and avg_doc_length > 0:
+            return total_docs, avg_doc_length
+    except Exception:
+        pass
+
+    # Backward-compatible schema used by current store_index.py.
+    try:
+        corpus_stats_df = read_cassandra_table(spark, keyspace, "corpus_stats")
+        row = (
+            corpus_stats_df.where(F.col("stat_key") == F.lit("bm25"))
+            .select("document_count", "average_document_length")
+            .limit(1)
+            .collect()
+        )
+        if row:
+            return float(row[0]["document_count"] or 0.0), float(row[0]["average_document_length"] or 0.0)
+    except Exception:
+        pass
+
+    return 0.0, 0.0
 
 
 def main() -> None:
     args = parse_args()
-    query_text = read_query(args)
-    query_terms = sorted(set(tokenize(query_text)))
+    raw_query = read_query_from_stdin()
+    query_terms = sorted(set(normalize_query(raw_query)))
 
     if not query_terms:
-        print("Empty query")
+        print("Empty query after normalization. Please enter at least one valid term.")
         return
 
-    spark = SparkSession.builder.appName("search query bm25").getOrCreate()
-    sc = spark.sparkContext
+    top_k = max(1, args.top_k)
+    k1 = 1.5
+    b = 0.75
 
-    cluster = Cluster([args.host], port=args.port)
-    session = cluster.connect(args.keyspace)
+    spark = build_spark_session(args.host, args.port)
 
     try:
-        n_docs, avgdl = fetch_corpus_stats(session)
-        term_rows = fetch_query_terms(session, query_terms)
-        if not term_rows or n_docs <= 0 or avgdl <= 0:
-            print("No results")
-            return
-
-        selected_terms = [row.term for row in term_rows]
-        postings = fetch_postings(session, selected_terms)
-        if not postings:
-            print("No results")
-            return
-
-        n_docs_bc = sc.broadcast(n_docs)
-        avgdl_bc = sc.broadcast(avgdl)
-        k1_bc = sc.broadcast(args.k1)
-        b_bc = sc.broadcast(args.b)
-
-        ranked = (
-            sc.parallelize(postings)
-            .map(
-                lambda row: (
-                    (row.doc_id, row.title),
-                    bm25_score(
-                        row.term_frequency,
-                        row.document_frequency,
-                        row.doc_length,
-                        n_docs_bc.value,
-                        avgdl_bc.value,
-                        k1_bc.value,
-                        b_bc.value,
-                    ),
-                )
-            )
-            .reduceByKey(lambda a, b: a + b)
-            .takeOrdered(10, key=lambda item: -item[1])
+        vocabulary_df = read_cassandra_table(spark, args.keyspace, "vocabulary").select("term")
+        inverted_index_raw_df = read_cassandra_table(spark, args.keyspace, "inverted_index")
+        inverted_index_df = inverted_index_raw_df.select(
+            "term",
+            "doc_id",
+            F.coalesce(F.col("tf"), F.col("term_frequency")).alias("tf"),
+            F.coalesce(F.col("df"), F.col("document_frequency")).alias("df"),
+        )
+        document_stats_df = read_cassandra_table(spark, args.keyspace, "document_stats").select(
+            "doc_id", "title", "doc_length"
         )
 
-        if not ranked:
-            print("No results")
+        query_terms_df = spark.createDataFrame([(term,) for term in query_terms], ["term"])
+        valid_terms_df = query_terms_df.join(vocabulary_df, on="term", how="inner").distinct()
+
+        if valid_terms_df.rdd.isEmpty():
+            print("No results found for the given query.")
             return
 
-        for (doc_id, title), score in ranked:
-            print(f"{doc_id}\t{title}\t{score:.6f}")
+        total_docs, avg_doc_length = get_collection_stats(spark, args.keyspace)
+        if total_docs <= 0 or avg_doc_length <= 0:
+            print("No results found: collection statistics are missing or invalid.")
+            return
+
+        n_docs_lit = F.lit(float(total_docs))
+        avgdl_lit = F.lit(float(avg_doc_length))
+        k1_lit = F.lit(float(k1))
+        b_lit = F.lit(float(b))
+
+        # BM25 formula:
+        # idf = log(1 + (N - df + 0.5) / (df + 0.5))
+        # score = idf * ((tf * (k1 + 1)) / (tf + k1 * (1 - b + b * dl / avgdl)))
+        ranked_df = (
+            inverted_index_df.join(valid_terms_df, on="term", how="inner")
+            .join(document_stats_df, on="doc_id", how="inner")
+            .where((F.col("tf") > 0) & (F.col("df") > 0) & (F.col("doc_length") > 0))
+            .withColumn(
+                "idf",
+                F.log(F.lit(1.0) + ((n_docs_lit - F.col("df") + F.lit(0.5)) / (F.col("df") + F.lit(0.5)))),
+            )
+            .withColumn(
+                "bm25_part",
+                F.col("idf")
+                * (
+                    (F.col("tf") * (k1_lit + F.lit(1.0)))
+                    / (
+                        F.col("tf")
+                        + k1_lit
+                        * (F.lit(1.0) - b_lit + b_lit * (F.col("doc_length") / avgdl_lit))
+                    )
+                ),
+            )
+            .groupBy("doc_id")
+            .agg(F.first("title").alias("title"), F.sum("bm25_part").alias("score"))
+            .orderBy(F.desc("score"), F.asc("doc_id"))
+            .limit(top_k)
+        )
+
+        results = ranked_df.select("doc_id", "title").collect()
+        if not results:
+            print("No results found for the given query.")
+            return
+
+        for row in results:
+            print(f"{row['doc_id']}\t{row['title']}")
     finally:
-        session.shutdown()
-        cluster.shutdown()
         spark.stop()
 
 

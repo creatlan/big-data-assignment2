@@ -1,0 +1,149 @@
+\documentclass[12pt]{article}
+\usepackage[a4paper,margin=1in]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage{hyperref}
+\usepackage{enumitem}
+\usepackage{titlesec}
+\usepackage{longtable}
+\usepackage{array}
+\usepackage{amsmath}
+\usepackage{amsfonts}
+
+\hypersetup{colorlinks=true,linkcolor=blue,urlcolor=blue}
+\setlist[itemize]{leftmargin=1.2em,itemsep=0.3em}
+\titleformat{\section}{\large\bfseries}{\thesection}{0.6em}{}
+\titleformat{\subsection}{\normalsize\bfseries}{\thesubsection}{0.6em}{}
+
+\title{Assignment 2}
+\date{}
+\begin{document}
+\maketitle
+
+\section{Methodology}
+\subsection{Goal}
+The goal of this part of the assignment was to prepare plain text documents from a parquet file, build the first search index with Hadoop MapReduce, and store the index data in Cassandra or ScyllaDB. I did not use Pandas, as it was mentioned and used PySpark for all data preparation steps.
+
+\subsection{Initial template}
+The repository template already had the main folders and script names, but some parts were incomplete or not connected. 
+
+\subsection{Idea}
+The idea was to split the work into small steps. First, I read the parquet file with PySpark and extracted at least 1000 documents. Then I created plain text files with the naming format \texttt{<doc\_id>\_<doc\_title>.txt}. After that, I built a normalized input file for MapReduce, then I created the index, and finally I loaded the result into Cassandra or ScyllaDB.
+
+The pipeline order was:
+\begin{itemize}
+    \item parquet $\rightarrow$ plain text documents in HDFS \texttt{/data}
+    \item \texttt{/data} $\rightarrow$ normalized RDD output in HDFS \texttt{/input/data}
+    \item \texttt{/input/data} $\rightarrow$ inverted index, vocabulary, and BM25 statistics in HDFS \texttt{/indexer}
+    \item HDFS outputs $\rightarrow$ Cassandra or ScyllaDB tables
+\end{itemize}
+
+\subsection{Tools used}
+I used:
+\begin{itemize}
+    \item PySpark for data preparation and the input RDD
+    \item Hadoop Streaming for MapReduce pipelines
+    \item Bash scripts for running the full pipeline
+    \item Cassandra driver for loading the index into the database
+\end{itemize}
+
+
+\section{Data Collection and Preparation}
+\subsection{Task}
+The assignment requires using one parquet file and extracting at least 1000 documents. Every document must contain \texttt{id}, \texttt{title}, and \texttt{text}. The documents must be plain text, not XML or JSON, and the file name must follow the format \texttt{<doc\_id>\_<doc\_title>.txt}.
+
+\subsection{Implementation}
+I implemented the preparation step in \texttt{prepare\_data.py} with PySpark. The script reads the parquet file, keeps only the columns \texttt{id}, \texttt{title}, and \texttt{text}, filters empty text, and writes the selected documents to plain text files. The output file names are sanitized so that spaces become underscores.
+
+The assignment also asks to put the documents in HDFS under \texttt{/data}. After creating the local files, the script uploads them to HDFS. Then it reads the documents again with Spark RDD \texttt{wholeTextFiles} and creates the normalized input file in \texttt{/input/data}.
+
+\subsection{What I changed from the template}
+The template had a small example, but I made it more robust. I added:
+\begin{itemize}
+    \item filtering for empty text
+    \item safe file-name creation
+    \item HDFS upload of the text documents
+    \item creation of the one-partition normalized dataset
+\end{itemize}
+
+\subsection{Output format}
+The normalized RDD output is one line per document in the following format:
+\[
+\texttt{doc\_id}\;\texttt{doc\_title}\;\texttt{doc\_text}
+\]
+This format is later used by the Hadoop Streaming indexer.
+
+
+\section{Indexer Tasks}
+\subsection{Task}
+The assignment asks to build Hadoop MapReduce pipelines that create the index data and store it as one partition in HDFS under \texttt{/indexer}. The minimum required outputs are:
+\begin{itemize}
+    \item vocabulary of the extracted terms
+    \item index of the documents
+    \item statistics required for BM25
+\end{itemize}
+
+\subsection{Design choice}
+I used three MapReduce pipelines:
+\begin{enumerate}
+    \item build the inverted index
+    \item build the document statistics and corpus statistics
+    \item build the vocabulary
+\end{enumerate}
+
+This design is simple and easy to debug. Each pipeline has one clear responsibility. The first pipeline extracts term postings, the second pipeline computes document length and corpus statistics, and the third pipeline creates a vocabulary with term ids.
+
+\subsection{Index format}
+For the inverted index, I store one row per term with the following information:
+\begin{itemize}
+    \item term
+    \item document frequency \(df\)
+    \item total term frequency \(ctf\)
+    \item postings in the form \texttt{doc\_id|title|tf|doc\_length}
+\end{itemize}
+
+For BM25, I also store the document statistics:
+\begin{itemize}
+    \item document id
+    \item title
+    \item document length
+    \item number of documents \(N\)
+    \item average document length \(dl_{avg}\)
+\end{itemize}
+
+The BM25 idea is based on this formula:
+\[
+BM25(q,d)=\sum_{t \in q} \log\left(\frac{N}{df(t)}\right) \cdot \frac{(k_1+1)\,tf(t,d)}{k_1\cdot\left((1-b)+b\cdot\frac{dl(d)}{dl_{avg}}\right)+tf(t,d)}
+\]
+In my implementation I use the common values \(k_1=1.0\) and \(b=0.75\).
+
+\subsection{Scripts used}
+I used these scripts:
+\begin{itemize}
+    \item \texttt{create\_index.sh} to run the Hadoop Streaming pipelines
+    \item \texttt{store\_index.sh} to read the HDFS outputs and load them into Cassandra/ScyllaDB
+    \item \texttt{index.sh} to run both steps one after another
+\end{itemize}
+
+\subsection{Problems and fixes}
+The biggest problem was that the mapper and reducer formats were not compatible at the beginning. Because of that, the output was not stable. I solved this by using a clear TSV format for each pipeline.
+
+Another problem was path mismatch in the shell scripts. Some scripts were calling the wrong Python path after changing directory to \texttt{app}. I fixed those calls and aligned all paths with the real project structure.
+
+\subsection{Database storage}
+I created tables for:
+\begin{itemize}
+    \item vocabulary
+    \item inverted\_index
+    \item document\_stats
+    \item corpus\_stats
+\end{itemize}
+
+This schema is enough for BM25 ranking because it stores the term statistics, the postings, and the corpus-level values.
+
+\subsection{+Optional feature}
+I also added \texttt{add\_to\_index.sh} as an optional extra. It lets the user pass a local text file and add it to the existing index data. This is useful for incremental indexing.
+
+
+\end{document}
