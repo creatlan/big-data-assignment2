@@ -1,106 +1,44 @@
-from __future__ import annotations
-
+#!/usr/bin/env python3
 import sys
 
 
-CORPUS_KEY = "__CORPUS__"
+current_term = None
+postings = []
 
 
-def emit_document_row(doc_id: str, doc_title: str, doc_length: int) -> None:
-    """Write one validated document statistics row to stdout."""
-
-    print(f"STAT\t{doc_id}\t{doc_title}\t{doc_length}")
-
-
-def emit_corpus_row(document_count: int, total_length: int) -> None:
-    """Write corpus-level BM25 statistics row to stdout."""
-
-    average_document_length = (total_length / document_count) if document_count else 0.0
-    print(f"CORPUS\t{document_count}\t{average_document_length:.10f}\t{total_length}")
+def doc_sort_key(item):
+    doc_id = item[0]
+    if doc_id.isdigit():
+        return (0, int(doc_id))
+    return (1, doc_id)
 
 
-current_doc_id: str | None = None
-current_doc_title: str | None = None
-current_doc_length: int | None = None
-
-document_count = 0
-total_length = 0
-
-
-def flush_current_document() -> None:
-    global current_doc_id, current_doc_title, current_doc_length
-    if current_doc_id is None or current_doc_title is None or current_doc_length is None:
+def flush(term, items):
+    if term is None or not items:
         return
-    emit_document_row(current_doc_id, current_doc_title, current_doc_length)
-    current_doc_id = None
-    current_doc_title = None
-    current_doc_length = None
+    ordered = sorted(items, key=doc_sort_key)
+    posting_text = ",".join(f"{doc_id}:{tf}" for doc_id, tf in ordered)
+    df = len(ordered)
+    print(f"VOCAB\t{term}\t{df}")
+    print(f"INDEX\t{term}\t{df}\t{posting_text}")
 
-for raw_line in sys.stdin:
-    line = raw_line.strip()
-    if not line:
+
+for line in sys.stdin:
+    line = line.rstrip("\n")
+    if not line or "\t" not in line:
         continue
-
-    try:
-        key, record_type, payload = line.split("\t", 2)
-    except ValueError:
-        print(f"Skipping malformed line: {line!r}", file=sys.stderr)
+    term, value = line.split("\t", 1)
+    doc_id, tf = value.split(":", 1)
+    if current_term is None:
+        current_term = term
+        postings = [(doc_id, int(tf))]
         continue
-
-    key = key.strip()
-    record_type = record_type.strip()
-    payload = payload.strip()
-
-    if not key or not record_type or not payload:
-        print(f"Skipping incomplete row: {line!r}", file=sys.stderr)
+    if term == current_term:
+        postings.append((doc_id, int(tf)))
         continue
+    flush(current_term, postings)
+    current_term = term
+    postings = [(doc_id, int(tf))]
 
-    if key == CORPUS_KEY and record_type == "LEN":
-        try:
-            doc_length = int(payload)
-        except ValueError:
-            print(f"Skipping corpus row with invalid length: {line!r}", file=sys.stderr)
-            continue
-        if doc_length < 0:
-            print(f"Skipping corpus row with negative length: {line!r}", file=sys.stderr)
-            continue
 
-        document_count += 1
-        total_length += doc_length
-        continue
-
-    if record_type != "DOC":
-        print(f"Skipping unknown record type: {line!r}", file=sys.stderr)
-        continue
-
-    fields = payload.split("\t", 1)
-    if len(fields) != 2:
-        fields = payload.split("|", 1)
-    if len(fields) != 2:
-        print(f"Skipping malformed DOC payload: {line!r}", file=sys.stderr)
-        continue
-
-    doc_title = fields[0].strip()
-    doc_length_raw = fields[1].strip()
-
-    try:
-        doc_length = int(doc_length_raw)
-    except ValueError:
-        print(f"Skipping document row with invalid length: {line!r}", file=sys.stderr)
-        continue
-
-    if doc_length < 0:
-        print(f"Skipping document row with negative length: {line!r}", file=sys.stderr)
-        continue
-
-    if current_doc_id is None:
-        current_doc_id = key
-    if key != current_doc_id:
-        flush_current_document()
-        current_doc_id = key
-
-    current_doc_title = doc_title
-    current_doc_length = doc_length
-
-flush_current_document()
-emit_corpus_row(document_count, total_length)
+flush(current_term, postings)

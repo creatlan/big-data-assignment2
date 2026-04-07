@@ -1,43 +1,22 @@
-from __future__ import annotations
-
+#!/usr/bin/env python3
 import re
 import sys
-from collections import Counter
 
 
-TOKEN_PATTERN = re.compile(r"[a-z0-9']+")
+TOKEN_RE = re.compile(r"[a-z0-9]+")
 
 
-def tokenize(text: str) -> list[str]:
-    """Normalize text and split it into lowercase terms."""
-
-    return TOKEN_PATTERN.findall(text.lower())
-
-
-for raw_line in sys.stdin:
-    line = raw_line.strip()
-    if not line:
+for line in sys.stdin:
+    line = line.rstrip("\n")
+    parts = line.split("\t", 2)
+    if len(parts) != 3:
         continue
-
-    try:
-        doc_id, doc_title, doc_text = line.split("\t", 2)
-    except ValueError:
-        print(f"Skipping malformed line: {line!r}", file=sys.stderr)
-        continue
-
+    doc_id, title, text = parts
     doc_id = doc_id.strip()
-    doc_title = doc_title.strip()
-    doc_text = doc_text.strip()
-
-    if not doc_id or not doc_title or not doc_text:
+    title = title.replace("|", " ").strip()
+    tokens = TOKEN_RE.findall(text.lower())
+    if not doc_id or not title or not tokens:
         continue
-
-    tokens = tokenize(doc_text)
-    if not tokens:
-        continue
-
-    term_counts = Counter(tokens)
-    doc_length = len(tokens)
-
-    for term, frequency in term_counts.items():
-        print(f"{term}\t{doc_id}|{doc_title}|{frequency}|{doc_length}")
+    print(f"DOC|{doc_id}\t{title}\t{len(tokens)}")
+    for term in tokens:
+        print(f"TERM|{term}|{doc_id}\t1")

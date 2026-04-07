@@ -1,58 +1,52 @@
-from __future__ import annotations
-
+#!/usr/bin/env python3
 import sys
 
-def flush_term(term: str | None, postings: list[str], total_term_frequency: int) -> None:
-    """Emit one inverted-index row for the accumulated term."""
 
-    if term is None:
+current_key = None
+current_values = []
+
+
+def flush(key, values):
+    if key is None or not values:
         return
-    document_frequency = len(postings)
-    print(f"INDEX\t{term}\t{document_frequency}\t{total_term_frequency}\t{';'.join(postings)}")
+    parts = key.split("|")
+    if parts[0] == "DOC" and len(parts) == 2:
+        title = ""
+        length = 0
+        for value in values:
+            value_parts = value.split("\t")
+            if len(value_parts) != 2:
+                continue
+            title = value_parts[0]
+            length = int(value_parts[1])
+        if title and length > 0:
+            print(f"DOC\t{parts[1]}\t{title}\t{length}")
+    elif parts[0] == "TERM" and len(parts) == 3:
+        total = 0
+        for value in values:
+            if value:
+                total += int(value)
+        if total > 0:
+            print(f"TERM\t{parts[1]}\t{parts[2]}\t{total}")
 
 
-current_term: str | None = None
-current_postings: list[str] = []
-current_total_term_frequency = 0
-
-for raw_line in sys.stdin:
-    line = raw_line.strip()
+for line in sys.stdin:
+    line = line.rstrip("\n")
     if not line:
         continue
-
-    try:
-        term, payload = line.split("\t", 1)
-    except ValueError:
-        print(f"Skipping malformed line: {line!r}", file=sys.stderr)
+    if "\t" not in line:
         continue
-
-    term = term.strip()
-    payload = payload.strip()
-
-    if not term or not payload:
+    key, value = line.split("\t", 1)
+    if current_key is None:
+        current_key = key
+        current_values = [value]
         continue
-
-    fields = payload.split("|")
-    if len(fields) != 4:
-        print(f"Skipping malformed payload: {line!r}", file=sys.stderr)
+    if key == current_key:
+        current_values.append(value)
         continue
+    flush(current_key, current_values)
+    current_key = key
+    current_values = [value]
 
-    try:
-        term_frequency = int(fields[2])
-    except ValueError:
-        print(f"Skipping payload with invalid frequency: {line!r}", file=sys.stderr)
-        continue
 
-    if current_term is None:
-        current_term = term
-
-    if term != current_term:
-        flush_term(current_term, current_postings, current_total_term_frequency)
-        current_term = term
-        current_postings = []
-        current_total_term_frequency = 0
-
-    current_postings.append(payload)
-    current_total_term_frequency += term_frequency
-
-flush_term(current_term, current_postings, current_total_term_frequency)
+flush(current_key, current_values)

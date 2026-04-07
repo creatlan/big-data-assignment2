@@ -5,6 +5,6 @@ import sys
 for line in sys.stdin:
     line = line.rstrip("\n")
     parts = line.split("\t")
-    if len(parts) != 4 or parts[0] != "TERM":
+    if len(parts) != 4 or parts[0] != "DOC":
         continue
-    print(f"{parts[1]}\t{parts[2]}:{parts[3]}")
+    print(f"CORPUS\t{parts[3]}")

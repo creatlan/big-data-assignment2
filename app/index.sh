@@ -1,8 +1,8 @@
 #!/bin/bash
-echo "This script include commands to run mapreduce jobs using hadoop streaming to index documents"
+set -e
 
-echo "Input path is :"
-echo $1
+APP_DIR=$(cd "$(dirname "$0")" && pwd)
+INPUT_PATH=${1:-/input/data}
 
-
-hdfs dfs -ls /
+bash "$APP_DIR/create_index.sh" "$INPUT_PATH"
+bash "$APP_DIR/store_index.sh"
