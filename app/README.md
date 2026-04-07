@@ -2,10 +2,13 @@
 This folder contains the data folder and all scripts and source code that are required to run your simple search engine. 
 
 ### data
-This folder stores the text documents required to index. Here you can find a sample of 100 documents from `a.parquet` file from the original source.
+This folder stores the text documents required to index. Here you can find a sample of 1000 documents from `a.parquet` file from the original source.
 
 ### mapreduce
 This folder stores the mapper `mapperx.py` and reducer `reducerx.py` scripts for the MapReduce pipelines.
+
+### app.py
+This is a Python file to write code to store index data in Cassandra.
 
 ### app.sh
 The entrypoint for the executables in your repository and includes all commands that will run your programs in this folder.
@@ -15,6 +18,12 @@ A script to create index data using MapReduce pipelines and store them in HDFS.
 
 ### index.sh
 A script to run the MapReduce pipelines and the programs to store data in Cassandra/ScyllaDB.
+
+### add_to_index.sh
+Bonus script for adding one local `<doc_id>_<doc_title>.txt` file to the existing Cassandra/ScyllaDB index without rebuilding the full MapReduce index.
+
+### add_to_index.py
+Python helper used by `add_to_index.sh` to parse the document, update document metadata, vocabulary, postings, and corpus statistics in Cassandra/ScyllaDB, and emit the corresponding prepared HDFS input record.
 
 ### prepare_data.py
 The script that will create documents from parquet file. You can run it in the driver.

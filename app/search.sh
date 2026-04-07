@@ -1,13 +1,22 @@
 #!/bin/bash
-echo "This script will include commands to search for documents given the query using Spark RDD"
+set -e
 
+APP_DIR=$(cd "$(dirname "$0")" && pwd)
+source "$APP_DIR/.venv/bin/activate"
 
-source .venv/bin/activate
-
-# Python of the driver (/app/.venv/bin/python)
-export PYSPARK_DRIVER_PYTHON=$(which python) 
-
-# Python of the excutor (./.venv/bin/python)
+export PYSPARK_DRIVER_PYTHON=$(which python)
 export PYSPARK_PYTHON=./.venv/bin/python
 
-spark-submit --master yarn --archives /app/.venv.tar.gz#.venv query.py  $1
+spark-submit \
+  --master yarn \
+  --deploy-mode client \
+  --archives /app/.venv.tar.gz#.venv \
+  --conf spark.executor.instances=1 \
+  --conf spark.executor.cores=1 \
+  --conf spark.executor.memory=512m \
+  --conf spark.driver.memory=512m \
+  --conf spark.ui.showConsoleProgress=false \
+  --conf spark.executorEnv.PYSPARK_PYTHON=./.venv/bin/python \
+  --conf spark.yarn.appMasterEnv.PYSPARK_PYTHON=./.venv/bin/python \
+  "$APP_DIR/query.py" \
+  "$@"
